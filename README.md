@@ -1,5 +1,5 @@
 # CrimesScaner
-
+usei ia 40% inscrito por ia
 Pequeno projeto para visualizar crimes em um mapa (Leaflet) e armazenar dados em JSON.
 
 ## Como executar
