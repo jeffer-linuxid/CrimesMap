@@ -4,7 +4,6 @@
   "private": true,
   "scripts": {
     "start": "node src/server.js",
-    "start:dev": "nodemon src/server.js",
     "lint": "eslint \"src/**/*.js\"",
     "format": "prettier --write \"src/**/*.{js,json,html,md}\""
   },

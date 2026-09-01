@@ -1,4 +1,3 @@
-
 document.addEventListener('DOMContentLoaded', () => {
   'use strict';
 
@@ -84,6 +83,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (!response.ok) {
         throw new Error(`Erro ao importar crimes: HTTP ${response.status}`);
+      }
+
+      return response.json().catch(() => null);
+    }
+
+    static async remove(id) {
+      const response = await fetch(
+        `${CONFIG.api.crimes}/${encodeURIComponent(id)}`,
+        { method: 'DELETE' }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Erro ao remover crime: HTTP ${response.status}`);
       }
 
       return response.json().catch(() => null);
@@ -391,7 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
       );
     }
 
-    remove(id) {
+    async remove(id) {
       const marker = this.markers.get(id);
 
       if (!marker) {
@@ -399,6 +411,14 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       if (!window.confirm('Deseja remover este crime?')) {
+        return;
+      }
+
+      try {
+        await CrimeApi.remove(id);
+      } catch (error) {
+        console.error('Erro ao remover crime no servidor:', error);
+        alert('Não foi possível remover o crime no servidor.');
         return;
       }
 
@@ -660,4 +680,4 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   loadCrimes();
-})
+});
