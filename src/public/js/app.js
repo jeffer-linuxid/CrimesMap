@@ -1,209 +1,663 @@
+
 document.addEventListener('DOMContentLoaded', () => {
-  const map = L.map('map').setView([-22.9, -43.2], 11);
+  'use strict';
 
-  const normalLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '© OpenStreetMap'
-  }).addTo(map);
-
-  const satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    maxZoom: 19, attribution: '© Esri'
-  });
-
-  const btnSat = document.getElementById('btnSat');
-  const btnMap = document.getElementById('btnMap');
-  const btnSearch = document.getElementById('btnSearch');
-  const searchInput = document.getElementById('search');
-  const btnAdd = document.getElementById('btnAdd');
-  const overlay = document.getElementById('overlay');
-  const formPopup = document.getElementById('formPopup');
-  const confirmAdd = document.getElementById('confirmAdd');
-  const cancelAdd = document.getElementById('cancelAdd');
-  const btnExport = document.getElementById('btnExport');
-  const fileInput = document.getElementById('fileimport');
-  const btnImport = document.getElementById('btnImport');
-
-  let tempLatLng = null;
-  const crimes = [];
-
-  btnSat.addEventListener('click', () => {
-    if (map.hasLayer(normalLayer)) {
-      map.removeLayer(normalLayer);
-      satLayer.addTo(map);
+  const CONFIG = Object.freeze({
+    api: {
+      crimes: '/api/crimes',
+      search: 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q='
+    },
+    map: {
+      initialCenter: [0, 0],
+      initialZoom: 1,
+      searchZoom: 14,
+      crimeRadius: 150
+    },
+    files: {
+      exportName: 'crimes.json'
     }
   });
 
-  btnMap.addEventListener('click', () => {
-    if (map.hasLayer(satLayer)) {
-      map.removeLayer(satLayer);
-      normalLayer.addTo(map);
-    }
-  });
+  const elements = {
+    map: document.getElementById('map'),
+    btnSat: document.getElementById('btnSat'),
+    btnMap: document.getElementById('btnMap'),
+    btnSearch: document.getElementById('btnSearch'),
+    btnAdd: document.getElementById('btnAdd'),
+    btnExport: document.getElementById('btnExport'),
+    btnImport: document.getElementById('btnImport'),
+    search: document.getElementById('search'),
+    fileInput: document.getElementById('fileimport'),
+    overlay: document.getElementById('overlay'),
+    formPopup: document.getElementById('formPopup'),
+    confirmAdd: document.getElementById('confirmAdd'),
+    cancelAdd: document.getElementById('cancelAdd'),
+    type: document.getElementById('type'),
+    description: document.getElementById('description'),
+    bairro: document.getElementById('bairro'),
+    city: document.getElementById('city')
+  };
 
-  btnSearch.addEventListener('click', async () => {
-    const q = searchInput.value.trim();
-    if (!q) return;
-    try {
-      const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}`);
-      const data = await r.json();
-      if (data.length > 0) {
-        const { lat, lon } = data[0];
-        map.setView([lat, lon], 14);
-      } else alert('Local não encontrado!');
-    } catch (err) {
-      console.error(err);
-      alert('Erro ao pesquisar localização.');
-    }
-  });
+  const state = {
+    crimes: new Map(),
+    pendingLocation: null,
+    activeLayer: null
+  };
 
-  function createAndAddCircle(c) {
-    c.latitude = Number(c.latitude);
-    c.longitude = Number(c.longitude);
-    c.data = c.data || new Date().toISOString();
+  class CrimeApi {
+    static async getAll() {
+      const response = await fetch(CONFIG.api.crimes);
 
-    crimes.push(c);
-
-    const marker = L.circle([c.latitude, c.longitude], {
-      color: 'red', fillColor: '#f03', fillOpacity: 0.5, radius: 150
-    })
-      .bindPopup(`
-        <b>Tipo:</b> ${c.type}<br>
-        <b>Descrição:</b> ${c.description}<br>
-        <b>Bairro:</b> ${c.bairro}<br>
-        <b>Cidade:</b> ${c.city}<br>
-        <b>Data:</b> ${new Date(c.data).toLocaleString('pt-BR')}
-        <br>
-        <button class="report-whatsapp">Reportar via WhatsApp</button>
-      `)
-      .addTo(map);
-
-    marker.__crime = c;
-    marker.on('dblclick', () => {
-      if (confirm('Deseja remover este crime?')) {
-        map.removeLayer(marker);
-        const idx = crimes.indexOf(marker.__crime);
-        if (idx > -1) crimes.splice(idx, 1);
-    
+      if (!response.ok) {
+        throw new Error(`Erro ao carregar crimes: HTTP ${response.status}`);
       }
-    });
 
-    marker.on('popupopen', () => {
-      const btn = document.querySelector('.report-whatsapp');
-      if (btn) btn.addEventListener('click', () => {
-        window.open('https://wa.me/?text=' + encodeURIComponent('Crime reportado: ' + c.description), '_blank');
+      return response.json();
+    }
+
+    static async create(crime) {
+      const response = await fetch(CONFIG.api.crimes, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify(crime)
       });
-    });
 
-    return marker;
+      if (!response.ok) {
+        throw new Error(`Erro ao salvar crime: HTTP ${response.status}`);
+      }
+
+      return response.json().catch(() => null);
+    }
+
+    static async createMany(crimes) {
+      const response = await fetch(CONFIG.api.crimes, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify(crimes)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Erro ao importar crimes: HTTP ${response.status}`);
+      }
+
+      return response.json().catch(() => null);
+    }
   }
 
-  btnAdd.addEventListener('click', () => {
-    alert('Clique no mapa para escolher o local do crime.');
-    map.once('click', (e) => {
-      tempLatLng = e.latlng;
-      overlay.style.display = 'block';
-      formPopup.style.display = 'block';
-    });
-  });
+  class LocationSearch {
+    static async search(query) {
+      const response = await fetch(
+        CONFIG.api.search + encodeURIComponent(query),
+        {
+          headers: {
+            Accept: 'application/json'
+          }
+        }
+      );
 
-  cancelAdd.addEventListener('click', () => {
-    overlay.style.display = 'none';
-    formPopup.style.display = 'none';
-  });
+      if (!response.ok) {
+        throw new Error(`Erro na pesquisa: HTTP ${response.status}`);
+      }
 
-  confirmAdd.addEventListener('click', async () => {
-    const type = document.getElementById('type').value.trim();
-    const description = document.getElementById('description').value.trim();
-    const bairro = document.getElementById('bairro').value.trim();
-    const city = document.getElementById('city').value.trim();
+      return response.json();
+    }
+  }
 
-    if (!type || !description || !bairro || !city) {
-      alert('Preencha todos os campos!');
+  class CrimeValidator {
+    static normalize(data) {
+      return {
+        id: data.id ?? crypto.randomUUID(),
+        latitude: Number(
+          data.latitude ??
+          data.lat ??
+          data.Latitude
+        ),
+        longitude: Number(
+          data.longitude ??
+          data.lng ??
+          data.long ??
+          data.lon ??
+          data.Longitude
+        ),
+        type: String(
+          data.type ??
+          data.tipo ??
+          ''
+        ).trim(),
+        description: String(
+          data.description ??
+          data.descricao ??
+          ''
+        ).trim(),
+        bairro: String(
+          data.bairro ??
+          ''
+        ).trim(),
+        city: String(
+          data.city ??
+          data.cidade ??
+          ''
+        ).trim(),
+        data:
+          data.data ??
+          data.date ??
+          new Date().toISOString()
+      };
+    }
+
+    static isValidLocation(crime) {
+      return (
+        Number.isFinite(crime.latitude) &&
+        Number.isFinite(crime.longitude) &&
+        crime.latitude >= -90 &&
+        crime.latitude <= 90 &&
+        crime.longitude >= -180 &&
+        crime.longitude <= 180
+      );
+    }
+
+    static isValid(crime) {
+      return (
+        this.isValidLocation(crime) &&
+        Boolean(crime.type) &&
+        Boolean(crime.description) &&
+        Boolean(crime.bairro) &&
+        Boolean(crime.city)
+      );
+    }
+  }
+
+  class Html {
+    static escape(value) {
+      const element = document.createElement('div');
+      element.textContent = String(value ?? '');
+      return element.innerHTML;
+    }
+  }
+
+  class MapManager {
+    constructor() {
+      this.map = L.map(elements.map).setView(
+        CONFIG.map.initialCenter,
+        CONFIG.map.initialZoom
+      );
+
+      this.layers = {
+        normal: L.tileLayer(
+          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+          }
+        ),
+        satellite: L.tileLayer(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          {
+            maxZoom: 19,
+            attribution: '© Esri'
+          }
+        )
+      };
+
+      this.layers.normal.addTo(this.map);
+      state.activeLayer = this.layers.normal;
+    }
+
+    showNormal() {
+      this.switchLayer(this.layers.normal);
+    }
+
+    showSatellite() {
+      this.switchLayer(this.layers.satellite);
+    }
+
+    switchLayer(layer) {
+      if (state.activeLayer === layer) {
+        return;
+      }
+
+      if (this.map.hasLayer(state.activeLayer)) {
+        this.map.removeLayer(state.activeLayer);
+      }
+
+      layer.addTo(this.map);
+      state.activeLayer = layer;
+    }
+
+    setView(latitude, longitude, zoom) {
+      this.map.setView([latitude, longitude], zoom);
+    }
+
+    onceClick(callback) {
+      this.map.once('click', callback);
+    }
+
+    addLayer(layer) {
+      layer.addTo(this.map);
+    }
+
+    removeLayer(layer) {
+      if (this.map.hasLayer(layer)) {
+        this.map.removeLayer(layer);
+      }
+    }
+  }
+
+  class CrimeForm {
+    open() {
+      elements.overlay.style.display = 'block';
+      elements.formPopup.style.display = 'block';
+    }
+
+    close() {
+      elements.overlay.style.display = 'none';
+      elements.formPopup.style.display = 'none';
+    }
+
+    clear() {
+      elements.type.value = '';
+      elements.description.value = '';
+      elements.bairro.value = '';
+      elements.city.value = '';
+    }
+
+    getData() {
+      return {
+        type: elements.type.value.trim(),
+        description: elements.description.value.trim(),
+        bairro: elements.bairro.value.trim(),
+        city: elements.city.value.trim()
+      };
+    }
+  }
+
+  class CrimeManager {
+    constructor(mapManager) {
+      this.mapManager = mapManager;
+      this.markers = new Map();
+    }
+
+    add(crime) {
+      const normalized = CrimeValidator.normalize(crime);
+
+      if (!CrimeValidator.isValid(normalized)) {
+        console.warn('Crime inválido:', normalized);
+        return null;
+      }
+
+      const id = normalized.id;
+
+      state.crimes.set(id, normalized);
+
+      const marker = this.createMarker(
+        id,
+        normalized
+      );
+
+      this.markers.set(id, marker);
+
+      return normalized;
+    }
+
+    createMarker(id, crime) {
+      const marker = L.circle(
+        [crime.latitude, crime.longitude],
+        {
+          color: 'red',
+          fillColor: '#f03',
+          fillOpacity: 0.5,
+          radius: CONFIG.map.crimeRadius
+        }
+      );
+
+      marker.bindPopup(
+        this.createPopup(crime)
+      );
+
+      marker.on('dblclick', () => {
+        this.remove(id);
+      });
+
+      marker.on('popupopen', () => {
+        const popup = marker.getPopup();
+
+        const button = popup
+          ?.getElement()
+          ?.querySelector('.report-whatsapp');
+
+        button?.addEventListener('click', () => {
+          this.reportWhatsApp(crime);
+        });
+      });
+
+      this.mapManager.addLayer(marker);
+
+      return marker;
+    }
+
+    createPopup(crime) {
+      return `
+        <div class="crime-popup">
+          <strong>Tipo:</strong>
+          ${Html.escape(crime.type)}
+          <br>
+
+          <strong>Descrição:</strong>
+          ${Html.escape(crime.description)}
+          <br>
+
+          <strong>Bairro:</strong>
+          ${Html.escape(crime.bairro)}
+          <br>
+
+          <strong>Cidade:</strong>
+          ${Html.escape(crime.city)}
+          <br>
+
+          <strong>Data:</strong>
+          ${Html.escape(
+            new Date(crime.data).toLocaleString('pt-BR')
+          )}
+
+          <br><br>
+
+          <button
+            type="button"
+            class="report-whatsapp"
+          >
+            Reportar via WhatsApp
+          </button>
+        </div>
+      `;
+    }
+
+    reportWhatsApp(crime) {
+      const message =
+        `Crime reportado: ${crime.description}`;
+
+      const url =
+        `https://wa.me/?text=${encodeURIComponent(message)}`;
+
+      window.open(
+        url,
+        '_blank',
+        'noopener,noreferrer'
+      );
+    }
+
+    remove(id) {
+      const marker = this.markers.get(id);
+
+      if (!marker) {
+        return;
+      }
+
+      if (!window.confirm('Deseja remover este crime?')) {
+        return;
+      }
+
+      this.mapManager.removeLayer(marker);
+
+      this.markers.delete(id);
+      state.crimes.delete(id);
+    }
+
+    addMany(crimes) {
+      return crimes
+        .map(crime => this.add(crime))
+        .filter(Boolean);
+    }
+
+    getAll() {
+      return [...state.crimes.values()];
+    }
+  }
+
+  class CrimeFileService {
+    constructor(crimeManager) {
+      this.crimeManager = crimeManager;
+    }
+
+    export() {
+      const data = JSON.stringify(
+        this.crimeManager.getAll(),
+        null,
+        2
+      );
+
+      const blob = new Blob(
+        [data],
+        {
+          type: 'application/json'
+        }
+      );
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+
+      link.href = url;
+      link.download = CONFIG.files.exportName;
+
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      URL.revokeObjectURL(url);
+    }
+
+    async import(file) {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+
+      if (!Array.isArray(parsed)) {
+        throw new Error(
+          'O JSON precisa conter um array.'
+        );
+      }
+
+      const crimes = parsed
+        .map(crime =>
+          CrimeValidator.normalize(crime)
+        )
+        .filter(crime =>
+          CrimeValidator.isValid(crime)
+        );
+
+      if (!crimes.length) {
+        throw new Error(
+          'Nenhum crime válido encontrado.'
+        );
+      }
+
+      this.crimeManager.addMany(crimes);
+
+      await CrimeApi.createMany(crimes);
+
+      return crimes.length;
+    }
+  }
+
+  const mapManager = new MapManager();
+  const crimeManager = new CrimeManager(mapManager);
+  const crimeForm = new CrimeForm();
+  const fileService = new CrimeFileService(crimeManager);
+
+  elements.btnSat.addEventListener(
+    'click',
+    () => mapManager.showSatellite()
+  );
+
+  elements.btnMap.addEventListener(
+    'click',
+    () => mapManager.showNormal()
+  );
+
+  async function searchLocation() {
+    const query = elements.search.value.trim();
+
+    if (!query) {
       return;
     }
 
-    const c = {
-      latitude: tempLatLng.lat,
-      longitude: tempLatLng.lng,
-      type, description, bairro, city,
-      data: new Date().toISOString()
-    };
-
-    createAndAddCircle(c);
-
     try {
-      await fetch('/api/crimes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(c)
-      });
-    } catch (err) {
-      console.error('Erro ao salvar crime:', err);
-    }
+      const results =
+        await LocationSearch.search(query);
 
-    overlay.style.display = 'none';
-    formPopup.style.display = 'none';
-    document.querySelectorAll('#formPopup input').forEach(i => i.value = '');
-  });
+      if (!results.length) {
+        alert('Local não encontrado!');
+        return;
+      }
 
-  btnExport.addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify(crimes, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'crimes.json';
-    a.click();
-  });
-
-  async function carregarCrimes() {
-    try {
-      const res = await fetch('/api/crimes');
-      const crimesAPI = await res.json();
-      crimesAPI.forEach(c => {
-        if (c.latitude && c.longitude) {
-          createAndAddCircle(c);
-        }
-      });
-    } catch (err) {
-      console.error('Erro ao carregar crimes:', err);
+      mapManager.setView(
+        Number(results[0].lat),
+        Number(results[0].lon),
+        CONFIG.map.searchZoom
+      );
+    } catch (error) {
+      console.error(error);
+      alert('Erro ao pesquisar localização.');
     }
   }
 
-  fileInput.addEventListener('change', async function () {
-    const file = this.files[0];
-    const reader = new FileReader();
-    reader.onload = async function (e) {
-      try {
-        const imported = JSON.parse(e.target.result);
-        if (!Array.isArray(imported)) return alert('JSON inválido: precisa ser um array');
+  elements.btnSearch.addEventListener(
+    'click',
+    searchLocation
+  );
 
-        imported.forEach(c => {
-          const obj = {
-            latitude: Number(c.latitude ?? c.lat ?? c.Latitude),
-            longitude: Number(c.longitude ?? c.lng ?? c.long ?? c.lon ?? c.Longitude),
-            type: c.type || c.tipo || '',
-            description: c.description || c.descricao || '',
-            bairro: c.bairro || '',
-            city: c.city || c.cidade || '',
-            data: c.data || c.date || new Date().toISOString()
-          };
-          createAndAddCircle(obj);
-        });
-
-        await fetch('/api/crimes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(imported)
-        });
-
-        alert(`Importados ${imported.length} crimes.`);
-      } catch (err) {
-        console.error(err);
-        alert('Erro ao importar arquivo JSON.');
+  elements.search.addEventListener(
+    'keydown',
+    event => {
+      if (event.key === 'Enter') {
+        searchLocation();
       }
-    };
-    reader.readAsText(file);
-  });
+    }
+  );
 
-  if (btnImport) btnImport.addEventListener('click', () => fileInput.click());
+  elements.btnAdd.addEventListener(
+    'click',
+    () => {
+      alert(
+        'Clique no mapa para escolher o local do crime.'
+      );
 
-  carregarCrimes();
-});
+      mapManager.onceClick(event => {
+        state.pendingLocation = event.latlng;
+        crimeForm.open();
+      });
+    }
+  );
+
+  elements.cancelAdd.addEventListener(
+    'click',
+    () => {
+      state.pendingLocation = null;
+      crimeForm.close();
+      crimeForm.clear();
+    }
+  );
+
+  elements.confirmAdd.addEventListener(
+    'click',
+    async () => {
+      if (!state.pendingLocation) {
+        alert('Selecione um local no mapa.');
+        return;
+      }
+
+      const crime = CrimeValidator.normalize({
+        ...crimeForm.getData(),
+        latitude: state.pendingLocation.lat,
+        longitude: state.pendingLocation.lng,
+        data: new Date().toISOString()
+      });
+
+      if (!CrimeValidator.isValid(crime)) {
+        alert(
+          'Preencha todos os campos corretamente.'
+        );
+        return;
+      }
+
+      crimeManager.add(crime);
+
+      try {
+        await CrimeApi.create(crime);
+      } catch (error) {
+        console.error(
+          'Erro ao salvar crime:',
+          error
+        );
+
+        alert(
+          'O crime foi adicionado ao mapa, mas não foi salvo no servidor.'
+        );
+      }
+
+      state.pendingLocation = null;
+      crimeForm.close();
+      crimeForm.clear();
+    }
+  );
+
+  elements.btnExport.addEventListener(
+    'click',
+    () => fileService.export()
+  );
+
+  if (elements.btnImport) {
+    elements.btnImport.addEventListener(
+      'click',
+      () => elements.fileInput.click()
+    );
+  }
+
+  elements.fileInput.addEventListener(
+    'change',
+    async event => {
+      const file = event.target.files?.[0];
+
+      if (!file) {
+        return;
+      }
+
+      try {
+        const count =
+          await fileService.import(file);
+
+        alert(
+          `Importados ${count} crimes.`
+        );
+      } catch (error) {
+        console.error(error);
+
+        alert(
+          error.message ||
+          'Erro ao importar arquivo JSON.'
+        );
+      } finally {
+        event.target.value = '';
+      }
+    }
+  );
+
+  async function loadCrimes() {
+    try {
+      const crimes = await CrimeApi.getAll();
+
+      crimeManager.addMany(crimes);
+    } catch (error) {
+      console.error(
+        'Erro ao carregar crimes:',
+        error
+      );
+    }
+  }
+
+  loadCrimes();
+})
